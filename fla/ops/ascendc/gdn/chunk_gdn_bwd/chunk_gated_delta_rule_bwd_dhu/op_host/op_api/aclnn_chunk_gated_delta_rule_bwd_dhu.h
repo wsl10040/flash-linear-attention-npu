@@ -1,7 +1,11 @@
-/*
- * This file declares the aclnn entrypoints for chunk_gated_delta_rule_bwd_dhu.
- */
-
+/**
+ * Copyright (c) 2025 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ */
 #ifndef ACLNN_CHUNK_GATED_DELTA_RULE_BWD_DHU_H_
 #define ACLNN_CHUNK_GATED_DELTA_RULE_BWD_DHU_H_
 
@@ -11,6 +15,27 @@
 extern "C" {
 #endif
 
+/* funtion: aclnnChunkGatedDeltaRuleBwdDhuGetWorkspaceSize
+ * parameters :
+ * q : required
+ * k : required
+ * w : required
+ * dO : required
+ * dv : required
+ * gOptional : optional
+ * gkOptional : optional
+ * h0Optional : optional
+ * dhtOptional : optional
+ * cuSeqlensOptional : optional
+ * chunkIndicesOptional : optional
+ * scale : optional
+ * chunkSize : optional
+ * dhOut : required
+ * dh0Out : required
+ * dv2Out : required
+ * workspaceSize : size of workspace(output).
+ * executor : executor context(output).
+ */
 __attribute__((visibility("default")))
 aclnnStatus aclnnChunkGatedDeltaRuleBwdDhuGetWorkspaceSize(
     const aclTensor *q,
@@ -32,6 +57,13 @@ aclnnStatus aclnnChunkGatedDeltaRuleBwdDhuGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
+/* funtion: aclnnChunkGatedDeltaRuleBwdDhu
+ * parameters :
+ * workspace : workspace memory addr(input).
+ * workspaceSize : size of workspace(input).
+ * executor : executor context(input).
+ * stream : acl stream.
+ */
 __attribute__((visibility("default")))
 aclnnStatus aclnnChunkGatedDeltaRuleBwdDhu(
     void *workspace,
@@ -43,4 +75,4 @@ aclnnStatus aclnnChunkGatedDeltaRuleBwdDhu(
 }
 #endif
 
-#endif // ACLNN_CHUNK_GATED_DELTA_RULE_BWD_DHU_H_
+#endif
