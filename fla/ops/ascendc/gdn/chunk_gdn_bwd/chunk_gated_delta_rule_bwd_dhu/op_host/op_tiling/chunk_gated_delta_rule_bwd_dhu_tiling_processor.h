@@ -242,7 +242,7 @@ private:
                 const uint64_t fixedBytes =
                     2 * Align32(gateElems * gateSize) +
                     gateFactorResidentCount *
-                        Align32(static_cast<uint64_t>(HEADS_PER_TASK) * gateElems * DTYPE_SIZE_FLOAT);
+                        Align32(static_cast<uint64_t>(tiling_.headsPerTask) * gateElems * DTYPE_SIZE_FLOAT);
                 if (fixedBytes + VectorTileBytes(row, maxDim, qSize) + UB_GUARD_BYTES <= ctx_.ubSize) {
                     break;
                 }
@@ -439,8 +439,18 @@ private:
 
     ge::graphStatus WorkspaceTiling()
     {
+        const int64_t coreNum = ctx_.aicCoreNum == 0 ? 1 : static_cast<int64_t>(ctx_.aicCoreNum);
+        int64_t chosen = HEADS_PER_TASK;
+        const int64_t taskNumAtFull = tiling_.seqNum * CeilDiv(tiling_.HV, HEADS_PER_TASK);
+        if (taskNumAtFull < coreNum) {
+            const int64_t taskNumAtHalf = tiling_.seqNum * CeilDiv(tiling_.HV, HEADS_PER_TASK / 2);
+            chosen = (taskNumAtHalf >= coreNum) ? (HEADS_PER_TASK / 2) : 1;
+        }
+        tiling_.headsPerTask = chosen;
+        tiling_.headWindowNum = CeilDiv(tiling_.HV, chosen);
         tiling_.taskNum = tiling_.seqNum * tiling_.headWindowNum;
-        blockDim_ = ctx_.aicCoreNum == 0 ? 1U : ctx_.aicCoreNum;
+        const int64_t usedCoreNum = tiling_.taskNum > coreNum ? coreNum : tiling_.taskNum;
+        blockDim_ = static_cast<uint32_t>(usedCoreNum > 0 ? usedCoreNum : 1);
 
         const uint64_t qSize = DtypeSize(ctx_.qDataType);
         tiling_.dh0ClearCoreNum = 0;

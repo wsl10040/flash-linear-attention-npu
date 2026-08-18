@@ -79,6 +79,7 @@ struct ChunkGatedDeltaRuleBwdDhuTilingData {
     int64_t chunkTaskNum;
     int64_t seqNum;
     int64_t headWindowNum;
+    int64_t headsPerTask;
     int64_t taskNum;
     int64_t isVariable;
     int64_t hasDh0;

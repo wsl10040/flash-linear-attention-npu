@@ -62,6 +62,7 @@ public:
         chunkSize_ = tiling_->chunkSize;
         totalChunkNum_ = tiling_->totalChunkNum;
         headWindowNum_ = tiling_->headWindowNum;
+        headsPerTask_ = tiling_->headsPerTask;
         taskNum_ = tiling_->taskNum;
         isVariable_ = tiling_->isVariable;
         scale_ = tiling_->scale;
@@ -96,11 +97,11 @@ public:
         pipe_->InitBuffer(statePing_, vecRow_ * V_ * static_cast<int64_t>(sizeof(float)));
         pipe_->InitBuffer(statePong_, vecRow_ * V_ * static_cast<int64_t>(sizeof(float)));
         pipe_->InitBuffer(qFp32Buf_, inputElems * static_cast<int64_t>(sizeof(float)));
-        pipe_->InitBuffer(gateFactorAllFp32_, HEADS_PER_TASK * gateElems_ * static_cast<int64_t>(sizeof(float)));
+        pipe_->InitBuffer(gateFactorAllFp32_, headsPerTask_ * gateElems_ * static_cast<int64_t>(sizeof(float)));
         if constexpr (USE_GK == 0) {
-            pipe_->InitBuffer(gRawAllFp32_, HEADS_PER_TASK * gateElems_ * static_cast<int64_t>(sizeof(float)));
+            pipe_->InitBuffer(gRawAllFp32_, headsPerTask_ * gateElems_ * static_cast<int64_t>(sizeof(float)));
             pipe_->InitBuffer(dvGateFactorAllFp32_,
-                              HEADS_PER_TASK * gateElems_ * static_cast<int64_t>(sizeof(float)));
+                              headsPerTask_ * gateElems_ * static_cast<int64_t>(sizeof(float)));
         }
         pipe_->InitBuffer(gBrcbBuf_, brcbElems * static_cast<int64_t>(sizeof(float)));
         pipe_->InitBuffer(outFp32Buf_, inputElems * static_cast<int64_t>(sizeof(float)));
@@ -153,10 +154,10 @@ public:
         for (int64_t taskIdx = coreIdx; taskIdx < taskNum_; taskIdx += blockNum) {
             const int64_t seqIdx = taskIdx / headWindowNum_;
             const int64_t headWindowIdx = taskIdx - seqIdx * headWindowNum_;
-            const int64_t hvBase = headWindowIdx * HEADS_PER_TASK;
-            const int64_t headCnt = Min(HEADS_PER_TASK, HV_ - hvBase);
+            const int64_t hvBase = headWindowIdx * headsPerTask_;
+            const int64_t headCnt = Min(headsPerTask_, HV_ - hvBase);
             const int64_t taskRound = (taskIdx - coreIdx) / blockNum;
-            const int64_t windowStartSlot = (taskRound & 1) * HEADS_PER_TASK;
+            const int64_t windowStartSlot = (taskRound & 1) * headsPerTask_;
             if (headCnt <= 0) {
                 continue;
             }
@@ -686,6 +687,7 @@ private:
     int64_t gateElems_ = 0;
     int64_t totalChunkNum_ = 0;
     int64_t headWindowNum_ = 0;
+    int64_t headsPerTask_ = 0;
     int64_t taskNum_ = 0;
     int64_t subBlockNum_ = 1;
     int64_t subBlockIdx_ = 0;

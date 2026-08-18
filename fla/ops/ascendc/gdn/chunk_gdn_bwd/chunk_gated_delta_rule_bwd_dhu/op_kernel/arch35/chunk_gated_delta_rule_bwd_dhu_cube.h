@@ -69,6 +69,7 @@ public:
         vecRow_ = tiling_->vecRow > 0 ? tiling_->vecRow : 8;
         totalChunkNum_ = tiling_->totalChunkNum;
         headWindowNum_ = tiling_->headWindowNum;
+        headsPerTask_ = tiling_->headsPerTask;
         taskNum_ = tiling_->taskNum;
         workspaceElemsPerSubBlock_ = tiling_->workspaceElemsPerSubBlock;
         dvStateWorkspaceOffset_ = tiling_->dvStateWorkspaceOffset;
@@ -127,10 +128,10 @@ public:
         for (int64_t taskIdx = blockIdx; taskIdx < taskNum_; taskIdx += blockNum) {
             const int64_t seqIdx = taskIdx / headWindowNum_;
             const int64_t headWindowIdx = taskIdx - seqIdx * headWindowNum_;
-            const int64_t hvBase = headWindowIdx * HEADS_PER_TASK;
-            const int64_t headCnt = Min(HEADS_PER_TASK, HV_ - hvBase);
+            const int64_t hvBase = headWindowIdx * headsPerTask_;
+            const int64_t headCnt = Min(headsPerTask_, HV_ - hvBase);
             const int64_t taskRound = (taskIdx - blockIdx) / blockNum;
-            const int64_t windowStartSlot = (taskRound & 1) * HEADS_PER_TASK;
+            const int64_t windowStartSlot = (taskRound & 1) * headsPerTask_;
             if (headCnt <= 0) {
                 continue;
             }
@@ -950,6 +951,7 @@ private:
     int64_t vecRow_ = 8;
     int64_t totalChunkNum_ = 0;
     int64_t headWindowNum_ = 0;
+    int64_t headsPerTask_ = 0;
     int64_t taskNum_ = 0;
     int64_t workspaceElemsPerSubBlock_ = 0;
     int64_t dvStateWorkspaceOffset_ = 0;
