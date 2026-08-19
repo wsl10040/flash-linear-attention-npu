@@ -17,8 +17,14 @@
 #endif
 
 #include "chunk_gated_delta_rule_bwd_dhu_struct.h"
+
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#include "arch35/chunk_gated_delta_rule_bwd_dhu_vec.h"
+#include "arch35/chunk_gated_delta_rule_bwd_dhu_cube.h"
+#else
 #include "chunk_gated_delta_rule_bwd_dhu_vec.h"
 #include "chunk_gated_delta_rule_bwd_dhu_cube.h"
+#endif
 
 #ifndef TORCH_MODE
 #include "kernel_operator.h"
