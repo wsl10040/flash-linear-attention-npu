@@ -351,6 +351,11 @@ public:
                             gRawAllFp32_.template Get<float>()[headOffset * gateElems_];
                         AscendC::LocalTensor<float> dvGateFactor =
                             dvGateFactorAllFp32_.template Get<float>()[headOffset * gateElems_];
+                        // gateRaw 由本 head 的 CastGateInputRows（PIPE_V 的 Cast/Adds）写入，
+                        // GetValue 属 PIPE_S，auto-sync 关闭时 V→S 依赖须显式同步
+                        // （pre_process_bwd_kernel_merged/arch22 先例同款写法）。
+                        AscendC::SetFlag<AscendC::HardEvent::V_S>(gateVToSEvent_);
+                        AscendC::WaitFlag<AscendC::HardEvent::V_S>(gateVToSEvent_);
                         const float gLast = gateRaw.GetValue(static_cast<uint32_t>(lastRow));
                         AscendC::Muls(dvGateFactor, gateRaw, -1.0f,
                                       static_cast<uint32_t>(chunkInfo.chunkLen));
@@ -503,6 +508,7 @@ private:
 
     __aicore__ inline void InitVectorEvents()
     {
+        gateVToSEvent_ = pipe_->AllocEventID<AscendC::HardEvent::V_S>();
         for (uint32_t eventIdx = 0; eventIdx < BUFFER_COUNT; ++eventIdx) {
             qMte2ToVEvent_[eventIdx] = pipe_->AllocEventID<AscendC::HardEvent::MTE2_V>();
             qVToMte2Event_[eventIdx] = pipe_->AllocEventID<AscendC::HardEvent::V_MTE2>();
@@ -524,6 +530,7 @@ private:
 
     __aicore__ inline void ReleaseVectorEvents()
     {
+        pipe_->ReleaseEventID<AscendC::HardEvent::V_S>(gateVToSEvent_);
         for (uint32_t eventIdx = 0; eventIdx < BUFFER_COUNT; ++eventIdx) {
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(qVToMte2Event_[eventIdx]);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(gateVToMte2Event_[eventIdx]);
@@ -767,6 +774,7 @@ private:
     AscendC::TEventID stateVToMte2Event_[BUFFER_COUNT];
     AscendC::TEventID stateVToMte3Event_[BUFFER_COUNT];
     AscendC::TEventID stateMte3ToMte2Event_[BUFFER_COUNT];
+    AscendC::TEventID gateVToSEvent_;
     uint32_t curQInputPingPong_ = 0;
     uint32_t curGateInputPingPong_ = 0;
     uint32_t curOutputPingPong_ = 0;
