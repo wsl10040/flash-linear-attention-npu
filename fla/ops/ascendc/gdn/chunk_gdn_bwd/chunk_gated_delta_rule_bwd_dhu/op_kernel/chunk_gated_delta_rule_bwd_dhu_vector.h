@@ -291,10 +291,13 @@ public:
                     for (int64_t rowOffset = 0; rowOffset < K_; rowOffset += vecRow_) {
                         const int64_t curRows = Min(vecRow_, K_ - rowOffset);
                         const uint32_t elems = static_cast<uint32_t>(curRows * V_);
-                        // 驻留：h 链常驻 UB 槽位，仅写 dh 输出；GM 往返路径保持原行为
+                        // 驻留：h 链常驻 UB 槽位，仅写 dh 输出；GM 往返路径保持原行为。
+                        // GM 路径 tile 装载在 buffer 头部（偏移 0），驻留路径槽位按
+                        // rowOffset*V_ 定位——两条路径的缓冲布局不同，偏移须分开。
                         const uint32_t stateIdx = stateResident_ ?
                             static_cast<uint32_t>(headOffset / subBlockNum_) :
                             curStatePingPong_;
+                        const int64_t stateBase = stateResident_ ? rowOffset * V_ : 0;
                         AscendC::LocalTensor<float> stateFp32 = stateBuf_[stateIdx];
                         if (!stateResident_) {
                             const uint32_t gmIdx = CopyInStateRows(
@@ -303,7 +306,7 @@ public:
                         } else {
                             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
                         }
-                        CopyOutFp32Rows(dhGm_, stateFp32[rowOffset * V_], dhBase + rowOffset * V_, elems);
+                        CopyOutFp32Rows(dhGm_, stateFp32[stateBase], dhBase + rowOffset * V_, elems);
                         if constexpr (USE_GK == 0) {
                             const int64_t lastRow = chunkInfo.chunkLen - 1;
                             const int64_t lastLane = lastRow - (lastRow / BRCB_GROUP_ROWS) * BRCB_GROUP_ROWS;
@@ -311,7 +314,7 @@ public:
                             for (int64_t col = 0; col < V_; col += VECTOR_REPEAT_FLOAT_ELEMS) {
                                 const uint64_t cur = static_cast<uint64_t>(
                                     V_ - col > VECTOR_REPEAT_FLOAT_ELEMS ? VECTOR_REPEAT_FLOAT_ELEMS : V_ - col);
-                                AscendC::Mul(stateFp32[rowOffset * V_ + col], stateFp32[rowOffset * V_ + col],
+                                AscendC::Mul(stateFp32[stateBase + col], stateFp32[stateBase + col],
                                              gBrcb[lastLane * BRCB_ROW_FLOAT_ELEMS], cur,
                                              static_cast<uint8_t>(curRows),
                                              {1, 1, 0, repeatStride, repeatStride, 0});
@@ -324,7 +327,7 @@ public:
                             for (int64_t col = 0; col < V_; col += VECTOR_REPEAT_FLOAT_ELEMS) {
                                 const uint64_t cur = static_cast<uint64_t>(
                                     V_ - col > VECTOR_REPEAT_FLOAT_ELEMS ? VECTOR_REPEAT_FLOAT_ELEMS : V_ - col);
-                                AscendC::Mul(stateFp32[rowOffset * V_ + col], stateFp32[rowOffset * V_ + col], gBrcb,
+                                AscendC::Mul(stateFp32[stateBase + col], stateFp32[stateBase + col], gBrcb,
                                              cur,
                                              static_cast<uint8_t>(curRows),
                                              {1, 1, 0, repeatStride, repeatStride, 1});
