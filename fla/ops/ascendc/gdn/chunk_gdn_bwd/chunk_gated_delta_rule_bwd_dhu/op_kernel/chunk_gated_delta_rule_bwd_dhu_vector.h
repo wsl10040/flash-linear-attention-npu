@@ -194,11 +194,16 @@ public:
                 const int64_t workspaceBase = WorkspaceBase(coreIdx, windowStartSlot + headOffset);
                 if (stateResident_) {
                     // 驻留：h[chunkCnt]=0 直接清 UB 槽位（slot = 归属序号，headOffset/subBlockNum_）。
-                    // 槽位只经 V pipe 读写，仅配 V_MTE2 一对事件
+                    // 槽位只经 V pipe 读写，仅配 V_MTE2 一对事件。
+                    // Duplicate 单次元素数受 repeat 上限约束，按 VECTOR_REPEAT 分块清零
                     const uint32_t stateIdx = static_cast<uint32_t>(headOffset / subBlockNum_);
                     AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
                     AscendC::LocalTensor<float> stateFp32 = stateBuf_[stateIdx];
-                    AscendC::Duplicate(stateFp32, 0.0f, static_cast<uint32_t>(K_ * V_));
+                    for (int64_t offset = 0; offset < K_ * V_; offset += VECTOR_REPEAT_FLOAT_ELEMS) {
+                        const uint32_t cur = static_cast<uint32_t>(
+                            K_ * V_ - offset > VECTOR_REPEAT_FLOAT_ELEMS ? VECTOR_REPEAT_FLOAT_ELEMS : K_ * V_ - offset);
+                        AscendC::Duplicate(stateFp32[offset], 0.0f, cur);
+                    }
                     AscendC::PipeBarrier<PIPE_V>();
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
                     continue;
