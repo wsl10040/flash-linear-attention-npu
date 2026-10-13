@@ -101,14 +101,19 @@ public:
         const int64_t outputRows = vecRow_ > 16 ? vecRow_ : 16;
         const int64_t outputElems = outputRows * (K_ > V_ ? K_ : V_);
         const int64_t brcbElems = vecRow_ * BRCB_ROW_FLOAT_ELEMS;
+        // state 驻留：h 链 [K,V] fp32 × 2 owned-head 槽常驻 UB（ping/pong 复用为槽位），
+        // S0b/S3 免 workspace GM 往返。条件与 host 侧 GetVecRow 的 allowResident 一致。
+        stateResident_ = tiling_->stateResident != 0 && subBlockNum_ >= 2 && K_ * V_ <= 65535 &&
+                         !stateVFirst_;
+        const int64_t stateBufElems = stateResident_ ? K_ * V_ : vecRow_ * V_;
         pipe_->InitBuffer(qInputPing_, inputElems * static_cast<int64_t>(sizeof(DT)));
         pipe_->InitBuffer(qInputPong_, inputElems * static_cast<int64_t>(sizeof(DT)));
         pipe_->InitBuffer(gInputPing_, gateElems_ * static_cast<int64_t>(sizeof(GT)));
         pipe_->InitBuffer(gInputPong_, gateElems_ * static_cast<int64_t>(sizeof(GT)));
         pipe_->InitBuffer(outputPing_, outputElems * static_cast<int64_t>(sizeof(DT)));
         pipe_->InitBuffer(outputPong_, outputElems * static_cast<int64_t>(sizeof(DT)));
-        pipe_->InitBuffer(statePing_, vecRow_ * V_ * static_cast<int64_t>(sizeof(float)));
-        pipe_->InitBuffer(statePong_, vecRow_ * V_ * static_cast<int64_t>(sizeof(float)));
+        pipe_->InitBuffer(statePing_, stateBufElems * static_cast<int64_t>(sizeof(float)));
+        pipe_->InitBuffer(statePong_, stateBufElems * static_cast<int64_t>(sizeof(float)));
         pipe_->InitBuffer(qFp32Buf_, inputElems * static_cast<int64_t>(sizeof(float)));
         pipe_->InitBuffer(gateFactorAllFp32_, HEADS_PER_TASK * gateElems_ * static_cast<int64_t>(sizeof(float)));
         if constexpr (USE_GK == 0) {
@@ -187,6 +192,17 @@ public:
                     continue;
                 }
                 const int64_t workspaceBase = WorkspaceBase(coreIdx, windowStartSlot + headOffset);
+                if (stateResident_) {
+                    // 驻留：h[chunkCnt]=0 直接清 UB 槽位（slot = 归属序号，headOffset/subBlockNum_）。
+                    // 槽位只经 V pipe 读写，仅配 V_MTE2 一对事件
+                    const uint32_t stateIdx = static_cast<uint32_t>(headOffset / subBlockNum_);
+                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
+                    AscendC::LocalTensor<float> stateFp32 = stateBuf_[stateIdx];
+                    AscendC::Duplicate(stateFp32, 0.0f, static_cast<uint32_t>(K_ * V_));
+                    AscendC::PipeBarrier<PIPE_V>();
+                    AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
+                    continue;
+                }
                 for (int64_t rowOffset = 0; rowOffset < K_; rowOffset += vecRow_) {
                     const int64_t curRows = Min(vecRow_, K_ - rowOffset);
                     const uint32_t elems = static_cast<uint32_t>(curRows * V_);
@@ -270,11 +286,19 @@ public:
                     for (int64_t rowOffset = 0; rowOffset < K_; rowOffset += vecRow_) {
                         const int64_t curRows = Min(vecRow_, K_ - rowOffset);
                         const uint32_t elems = static_cast<uint32_t>(curRows * V_);
-                        const uint32_t stateIdx = CopyInStateRows(
-                            stateBuf_[curStatePingPong_], StateWorkspaceFloatOffset(workspaceBase, rowOffset), elems);
+                        // 驻留：h 链常驻 UB 槽位，仅写 dh 输出；GM 往返路径保持原行为
+                        const uint32_t stateIdx = stateResident_ ?
+                            static_cast<uint32_t>(headOffset / subBlockNum_) :
+                            curStatePingPong_;
                         AscendC::LocalTensor<float> stateFp32 = stateBuf_[stateIdx];
-                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(stateMte2ToVEvent_[stateIdx]);
-                        CopyOutFp32Rows(dhGm_, stateFp32, dhBase + rowOffset * V_, elems);
+                        if (!stateResident_) {
+                            const uint32_t gmIdx = CopyInStateRows(
+                                stateFp32, StateWorkspaceFloatOffset(workspaceBase, rowOffset), elems);
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(stateMte2ToVEvent_[gmIdx]);
+                        } else {
+                            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
+                        }
+                        CopyOutFp32Rows(dhGm_, stateFp32[rowOffset * V_], dhBase + rowOffset * V_, elems);
                         if constexpr (USE_GK == 0) {
                             const int64_t lastRow = chunkInfo.chunkLen - 1;
                             const int64_t lastLane = lastRow - (lastRow / BRCB_GROUP_ROWS) * BRCB_GROUP_ROWS;
@@ -282,7 +306,7 @@ public:
                             for (int64_t col = 0; col < V_; col += VECTOR_REPEAT_FLOAT_ELEMS) {
                                 const uint64_t cur = static_cast<uint64_t>(
                                     V_ - col > VECTOR_REPEAT_FLOAT_ELEMS ? VECTOR_REPEAT_FLOAT_ELEMS : V_ - col);
-                                AscendC::Mul(stateFp32[col], stateFp32[col],
+                                AscendC::Mul(stateFp32[rowOffset * V_ + col], stateFp32[rowOffset * V_ + col],
                                              gBrcb[lastLane * BRCB_ROW_FLOAT_ELEMS], cur,
                                              static_cast<uint8_t>(curRows),
                                              {1, 1, 0, repeatStride, repeatStride, 0});
@@ -295,14 +319,19 @@ public:
                             for (int64_t col = 0; col < V_; col += VECTOR_REPEAT_FLOAT_ELEMS) {
                                 const uint64_t cur = static_cast<uint64_t>(
                                     V_ - col > VECTOR_REPEAT_FLOAT_ELEMS ? VECTOR_REPEAT_FLOAT_ELEMS : V_ - col);
-                                AscendC::Mul(stateFp32[col], stateFp32[col], gBrcb, cur,
+                                AscendC::Mul(stateFp32[rowOffset * V_ + col], stateFp32[rowOffset * V_ + col], gBrcb,
+                                             cur,
                                              static_cast<uint8_t>(curRows),
                                              {1, 1, 0, repeatStride, repeatStride, 1});
                             }
                         }
                         AscendC::PipeBarrier<PIPE_V>();
-                        CopyOutStateRows(stateIdx, stateFp32, StateWorkspaceFloatOffset(workspaceBase, rowOffset),
-                                         elems);
+                        if (!stateResident_) {
+                            CopyOutStateRows(stateIdx, stateFp32, StateWorkspaceFloatOffset(workspaceBase, rowOffset),
+                                             elems);
+                        } else {
+                            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
+                        }
                     }
 
                     // dh 已全部写 GM（上面 state 行循环的 CopyOutFp32Rows 完成），
@@ -457,14 +486,25 @@ public:
                         AscendC::PipeBarrier<PIPE_V>();
                         AscendC::Sub(termQFp32, termQFp32, outFp32, elems);
                         AscendC::PipeBarrier<PIPE_V>();
-                        const uint32_t stateIdx = CopyInStateRows(
-                            stateBuf_[curStatePingPong_], StateWorkspaceFloatOffset(workspaceBase, rowOffset), elems);
-                        AscendC::LocalTensor<float> stateFp32 = stateBuf_[stateIdx];
-                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(stateMte2ToVEvent_[stateIdx]);
-                        AscendC::Add(stateFp32, stateFp32, termQFp32, elems);
-                        AscendC::PipeBarrier<PIPE_V>();
-                        CopyOutStateRows(stateIdx, stateFp32, StateWorkspaceFloatOffset(workspaceBase, rowOffset),
-                                         elems);
+                        if (stateResident_) {
+                            // 驻留：h 链常驻 UB 槽位，直接原地累加，免 GM 往返
+                            const uint32_t stateIdx = static_cast<uint32_t>(headOffset / subBlockNum_);
+                            AscendC::LocalTensor<float> stateFp32 = stateBuf_[stateIdx];
+                            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
+                            AscendC::Add(stateFp32[rowOffset * V_], stateFp32[rowOffset * V_], termQFp32, elems);
+                            AscendC::PipeBarrier<PIPE_V>();
+                            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
+                        } else {
+                            const uint32_t stateIdx = CopyInStateRows(
+                                stateBuf_[curStatePingPong_],
+                                StateWorkspaceFloatOffset(workspaceBase, rowOffset), elems);
+                            AscendC::LocalTensor<float> stateFp32 = stateBuf_[stateIdx];
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(stateMte2ToVEvent_[stateIdx]);
+                            AscendC::Add(stateFp32, stateFp32, termQFp32, elems);
+                            AscendC::PipeBarrier<PIPE_V>();
+                            CopyOutStateRows(stateIdx, stateFp32, StateWorkspaceFloatOffset(workspaceBase, rowOffset),
+                                             elems);
+                        }
                     }
                 }
             }
@@ -479,16 +519,30 @@ public:
                     const int64_t hv = hvBase + headOffset;
                     const int64_t dh0Base = (seqIdx * HV_ + hv) * K_ * V_;
                     if (!stateVFirst_) {
-                        for (int64_t rowOffset = 0; rowOffset < K_; rowOffset += vecRow_) {
-                            const int64_t curRows = Min(vecRow_, K_ - rowOffset);
-                            const uint32_t elems = static_cast<uint32_t>(curRows * V_);
-                            const uint32_t stateIdx = CopyInStateRows(
-                                stateBuf_[curStatePingPong_], StateWorkspaceFloatOffset(workspaceBase, rowOffset), elems);
+                        if (stateResident_) {
+                            // 驻留：h0 直接从 UB 槽输出，免 GM 读回。槽位只经 V pipe，
+                            // 仅配 V_MTE2 一对事件
+                            const uint32_t stateIdx = static_cast<uint32_t>(headOffset / subBlockNum_);
                             AscendC::LocalTensor<float> stateFp32 = stateBuf_[stateIdx];
-                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(stateMte2ToVEvent_[stateIdx]);
-                            CopyOutFp32Rows(dh0Gm_, stateFp32, dh0Base + rowOffset * V_, elems);
+                            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
+                            for (int64_t rowOffset = 0; rowOffset < K_; rowOffset += vecRow_) {
+                                const int64_t curRows = Min(vecRow_, K_ - rowOffset);
+                                const uint32_t elems = static_cast<uint32_t>(curRows * V_);
+                                CopyOutFp32Rows(dh0Gm_, stateFp32[rowOffset * V_], dh0Base + rowOffset * V_, elems);
+                            }
                             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
-                            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(stateMte3ToMte2Event_[stateIdx]);
+                        } else {
+                            for (int64_t rowOffset = 0; rowOffset < K_; rowOffset += vecRow_) {
+                                const int64_t curRows = Min(vecRow_, K_ - rowOffset);
+                                const uint32_t elems = static_cast<uint32_t>(curRows * V_);
+                                const uint32_t stateIdx = CopyInStateRows(
+                                    stateBuf_[curStatePingPong_], StateWorkspaceFloatOffset(workspaceBase, rowOffset), elems);
+                                AscendC::LocalTensor<float> stateFp32 = stateBuf_[stateIdx];
+                                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(stateMte2ToVEvent_[stateIdx]);
+                                CopyOutFp32Rows(dh0Gm_, stateFp32, dh0Base + rowOffset * V_, elems);
+                                AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
+                                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(stateMte3ToMte2Event_[stateIdx]);
+                            }
                         }
                     } else {
                         CopyOutDh0VFirst(StateWorkspaceFloatOffset(workspaceBase, 0), dh0Base);
@@ -805,6 +859,7 @@ private:
     float scale_ = 1.0f;
     bool hasDh0_ = false;
     bool stateVFirst_ = false;
+    bool stateResident_ = false;
     int64_t dh0ClearCoreNum_ = 0;
     int64_t dh0ClearElemsPerCore_ = 0;
     int64_t dh0ClearTailElems_ = 0;

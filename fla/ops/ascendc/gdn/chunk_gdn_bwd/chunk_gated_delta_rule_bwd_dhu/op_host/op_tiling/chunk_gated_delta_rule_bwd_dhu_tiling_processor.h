@@ -263,10 +263,11 @@ private:
             gateFactorResidentCount *
                 Align32(static_cast<uint64_t>(HEADS_PER_TASK) * gateElems * DTYPE_SIZE_FLOAT);
         stateResident = false;
-        // 驻留路径仅在 arch35（A5）kernel 中实现，其他 arch 保持 GM 往返原行为；
-        // kernel FillFloatRegbase 的元素计数为 uint16，须 K*V <= 65535；
+        // 驻留路径：arch35（A5）为原实现；A2（2201）vector kernel 已补齐同款
+        // UB 驻留路径（state 链 S0b/S3 免 workspace GM 往返）。
+        // 两侧 kernel 的驻留元素计数均为 uint16，须 K*V <= 65535；
         // stateVFirst 时 kernel 驻留 dh0 分支无转置输出，须走 GM 往返
-        const bool allowResident = ctx_.isArch35 && !ctx_.stateVFirst &&
+        const bool allowResident = !ctx_.stateVFirst &&
             static_cast<uint64_t>(tiling_.K) * static_cast<uint64_t>(tiling_.V) <= 65535UL;
         if (ctx_.ubSize > UB_GUARD_BYTES) {
             if (allowResident) {
